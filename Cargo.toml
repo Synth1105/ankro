@@ -4,6 +4,8 @@ version = "0.0.0"
 edition = "2024"
 license = "WTFNMFPL"
 description = "Gatekeeper For Your Web App"
+repository = "https://github.com/Synth1105/ankro"
+homepage = "https://github.com/Synth1105/ankro"
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
 mimalloc = { version = "0.1.52", default-features = false }

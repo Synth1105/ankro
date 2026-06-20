@@ -1,0 +1,6 @@
+[workspace]
+allow_dirty = true
+semver_check = true
+git_release_enable = true
+git_release_type = "auto"
+

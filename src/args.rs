@@ -1,5 +1,3 @@
-
-
 use clap::{Parser, Subcommand};
 
 /// Gatekeeper For Your Web Application.
@@ -21,5 +19,9 @@ pub enum Commands {
         /// The target address or host
         #[arg(short, long)]
         target: String,
+
+        /// Number of requests allowed per IP before banning
+        #[arg(long, default_value_t = 1000)]
+        ban_threshold: usize,
     },
 }

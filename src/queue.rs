@@ -1,6 +1,4 @@
-
-
-use std::{collections::VecDeque, sync::mpsc::Sender};
+use std::{collections::VecDeque, net::IpAddr, sync::mpsc::Sender};
 
 use serde::{Deserialize, Serialize};
 
@@ -8,22 +6,29 @@ pub type Response = Result<Vec<u8>, String>;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StoredRequest {
+    #[serde(default)]
+    pub ip: Option<IpAddr>,
     pub request: Vec<String>,
 }
 
 pub struct PendingRequest {
+    pub ip: Option<IpAddr>,
     pub request: Vec<String>,
     pub responder: Option<Sender<Response>>,
 }
 
 #[derive(Default)]
 pub struct RequestQueue {
-    pub pending: VecDeque<PendingRequest>,
+    normal: VecDeque<PendingRequest>,
+    banned: VecDeque<PendingRequest>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
 pub struct DiskQueue {
-    pub pending: VecDeque<StoredRequest>,
+    #[serde(default)]
+    pub normal: VecDeque<StoredRequest>,
+    #[serde(default)]
+    pub banned: VecDeque<StoredRequest>,
 }
 
 impl RequestQueue {
@@ -31,40 +36,98 @@ impl RequestQueue {
         Self::default()
     }
 
-    pub fn push(&mut self, request: PendingRequest) {
-        self.pending.push_back(request);
+    pub fn push(&mut self, request: PendingRequest, banned: bool) {
+        if banned {
+            self.banned.push_back(request);
+        } else {
+            self.normal.push_back(request);
+        }
     }
 
     pub fn pop(&mut self) -> Option<PendingRequest> {
-        self.pending.pop_front()
+        self.normal.pop_front().or_else(|| self.banned.pop_front())
     }
 
     pub fn is_empty(&self) -> bool {
-        self.pending.is_empty()
+        self.normal.is_empty() && self.banned.is_empty()
     }
 
     pub fn from_disk(disk: DiskQueue) -> Self {
-        let pending = disk
-            .pending
+        let normal = disk
+            .normal
             .into_iter()
             .map(|request| PendingRequest {
+                ip: request.ip,
                 request: request.request,
                 responder: None,
             })
             .collect();
 
-        Self { pending }
+        let banned = disk
+            .banned
+            .into_iter()
+            .map(|request| PendingRequest {
+                ip: request.ip,
+                request: request.request,
+                responder: None,
+            })
+            .collect();
+
+        Self { normal, banned }
     }
 
     pub fn to_disk(&self) -> DiskQueue {
-        let pending = self
-            .pending
+        let normal = self
+            .normal
             .iter()
             .map(|request| StoredRequest {
+                ip: request.ip,
                 request: request.request.clone(),
             })
             .collect();
 
-        DiskQueue { pending }
+        let banned = self
+            .banned
+            .iter()
+            .map(|request| StoredRequest {
+                ip: request.ip,
+                request: request.request.clone(),
+            })
+            .collect();
+
+        DiskQueue { normal, banned }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PendingRequest, RequestQueue};
+
+    #[test]
+    fn normal_requests_are_drained_before_banned_requests() {
+        let mut queue = RequestQueue::new();
+        queue.push(
+            PendingRequest {
+                ip: None,
+                request: vec!["banned".into()],
+                responder: None,
+            },
+            true,
+        );
+        queue.push(
+            PendingRequest {
+                ip: None,
+                request: vec!["normal".into()],
+                responder: None,
+            },
+            false,
+        );
+
+        let first = queue.pop().unwrap();
+        let second = queue.pop().unwrap();
+
+        assert_eq!(first.request, vec!["normal"]);
+        assert_eq!(second.request, vec!["banned"]);
+        assert!(queue.is_empty());
     }
 }

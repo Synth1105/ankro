@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ANKRO Shield Lab</title>
+    <title>ANKRO Live Lab</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
@@ -12,13 +12,13 @@
 
     <main class="shell">
       <section class="hero card">
-        <div class="eyebrow">Mock DDoS Queue Lab</div>
+        <div class="eyebrow">Ankro Live Queue Lab</div>
         <div class="hero-grid">
           <div>
-            <h1>Busy일 때는 queue, 비면 direct</h1>
+            <h1>실제 ankro를 거치는 queue lab</h1>
             <p class="lede">
-              요청이 몰리면 방어 쉴드가 busy 상태로 바뀌고, 이후 들어오는 요청은 큐에 쌓입니다.
-              소비자가 하나씩 처리하면 backlog가 비고, 다시 원래 모드로 돌아갑니다.
+              브라우저 요청이 로컬 브리지 서버를 지나 ankro로 전달됩니다.
+              target이 busy이면 요청은 queue에 쌓이고, 처리 가능해지면 FIFO로 소비됩니다.
             </p>
           </div>
 
@@ -29,7 +29,7 @@
         </div>
 
         <div class="controls">
-          <button id="attackToggle" class="primary">Start mock DDoS</button>
+            <button id="attackToggle" class="primary">Start DDoS</button>
           <button id="probeBtn">Send probe</button>
           <button id="burstBtn">Fire burst</button>
 
@@ -42,11 +42,11 @@
           </label>
 
           <label class="slider">
-            <span>attack pace</span>
-            <div class="slider-row">
-              <input id="attackPace" type="range" min="80" max="500" value="180" />
-              <output id="attackPaceLabel">180ms</output>
-            </div>
+              <span>attack pace</span>
+              <div class="slider-row">
+                <input id="attackPace" type="range" min="80" max="500" value="180" />
+                <output id="attackPaceLabel">180ms</output>
+              </div>
           </label>
         </div>
       </section>
@@ -65,7 +65,7 @@
           <strong id="queueLengthValue">0</strong>
         </article>
         <article class="card metric">
-          <span class="metric-label">direct handled</span>
+          <span class="metric-label">completed</span>
           <strong id="directHandledValue">0</strong>
         </article>
         <article class="card metric">
@@ -79,7 +79,7 @@
           <div class="panel-head">
             <div>
               <h2>Queue lane</h2>
-              <p>busy면 들어오는 요청은 여기로 들어가고, idle이 되면 소비자가 앞에서부터 처리합니다.</p>
+              <p>pending 요청은 브리지 서버가 ankro 응답을 기다리는 동안 쌓이고, target이 풀리면 처리됩니다.</p>
             </div>
             <span class="badge" id="pressureBadge">pressure 0%</span>
           </div>
@@ -90,7 +90,7 @@
           <div class="panel-head">
             <div>
               <h2>Event feed</h2>
-              <p>직접 처리, 큐 적재, 큐 소비 흐름을 추적합니다.</p>
+              <p>요청 전송, 응답 도착, 공격 상태 전환을 추적합니다.</p>
             </div>
           </div>
           <ol id="eventFeed" class="event-feed"></ol>

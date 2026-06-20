@@ -1,11 +1,11 @@
 use std::{
-    sync::{Arc, Mutex, mpsc},
+    sync::{mpsc, Arc, Mutex},
     thread::{self, JoinHandle},
 };
 
 pub struct ThreadPool {
     _threads: Vec<Worker>,
-    sender: mpsc::Sender<Job>,
+    sender: mpsc::SyncSender<Job>,
 }
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
@@ -14,7 +14,8 @@ impl ThreadPool {
     pub fn new(size: usize) -> ThreadPool {
         assert!(size > 0);
 
-        let (tx, rx) = mpsc::channel();
+        // Bounded queue keeps accepted sockets from piling up indefinitely.
+        let (tx, rx) = mpsc::sync_channel(size);
         let rx = Arc::new(Mutex::new(rx));
 
         let mut workers = Vec::with_capacity(size);

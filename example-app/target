@@ -1,0 +1,58 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import { setTimeout as sleep } from 'node:timers/promises';
+
+const LOCK_PATH = '/tmp/ankro-example-target.lock';
+const LATENCY_MS = Number.parseInt(process.env.ANKRO_EXAMPLE_LATENCY_MS ?? '240', 10);
+
+function busyOutput() {
+    process.stdout.write(fs.existsSync(LOCK_PATH) ? 'busy\n' : '');
+}
+
+async function acquireLock() {
+    while (true) {
+        try {
+            return fs.openSync(LOCK_PATH, 'wx');
+        } catch (err) {
+            if (err && err.code === 'EEXIST') {
+                await sleep(20);
+                continue;
+            }
+
+            throw err;
+        }
+    }
+}
+
+async function handleRequest(payload) {
+    const fd = await acquireLock();
+
+    try {
+        await sleep(LATENCY_MS);
+        process.stdout.write(`ok ${payload}\n`);
+    } finally {
+        fs.closeSync(fd);
+        if (fs.existsSync(LOCK_PATH)) {
+            fs.unlinkSync(LOCK_PATH);
+        }
+    }
+}
+
+async function main() {
+    const [flag, ...rest] = process.argv.slice(2);
+
+    if (flag === '-b') {
+        busyOutput();
+        return;
+    }
+
+    if (flag === '-r') {
+        await handleRequest(rest.join(' '));
+        return;
+    }
+
+    process.stderr.write('usage: target -b | target -r <payload>\n');
+    process.exitCode = 1;
+}
+
+await main();

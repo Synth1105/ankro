@@ -18,17 +18,21 @@ impl BanList {
     }
 
     pub fn record(&mut self, ip: IpAddr) -> bool {
+        tracing::debug!("recording ip {ip}");
         let count = self.counts.entry(ip).or_insert(0);
         *count += 1;
 
         if *count >= self.threshold {
             self.banned.insert(ip);
         }
-
+        
         self.is_banned(&ip)
     }
 
     pub fn is_banned(&self, ip: &IpAddr) -> bool {
+        if  self.banned.contains(ip) {
+            tracing::debug!("{ip} is banned");
+        };
         self.banned.contains(ip)
     }
 

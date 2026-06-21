@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, net::IpAddr};
+use std::{collections::VecDeque, fmt::Display, net::IpAddr};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot::Sender;
@@ -12,13 +12,36 @@ pub struct StoredRequest {
     pub request: Vec<String>,
 }
 
+
+
+#[derive(Debug)]
 pub struct PendingRequest {
     pub ip: Option<IpAddr>,
     pub request: Vec<String>,
     pub responder: Option<Sender<Response>>,
 }
 
-#[derive(Default)]
+impl Display for PendingRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+
+        let ip_str = match self.ip {
+            Some(ip) => ip.to_string(),
+            None => "Unknown".to_string(),
+        };
+
+        let responder_str = match self.responder {
+            Some(_) => "Available",
+            None => "None",
+        };
+
+        write!(
+            f,
+            "PendingRequest {{ IP: {}, Requests: {:?}, Responder: {} }}",
+            ip_str, self.request, responder_str
+        )
+    }
+}
+#[derive(Default, Debug)]
 pub struct RequestQueue {
     normal: VecDeque<PendingRequest>,
     banned: VecDeque<PendingRequest>,
@@ -38,6 +61,7 @@ impl RequestQueue {
     }
 
     pub fn push(&mut self, request: PendingRequest, banned: bool) {
+        tracing::debug!("pushing queue with request {request}");
         if banned {
             self.banned.push_back(request);
         } else {
@@ -46,6 +70,7 @@ impl RequestQueue {
     }
 
     pub fn pop(&mut self) -> Option<(PendingRequest, bool)> {
+        tracing::debug!("poping queue");
         self.normal
             .pop_front()
             .map(|request| (request, false))
@@ -65,6 +90,7 @@ impl RequestQueue {
     }
 
     pub fn from_disk(disk: DiskQueue) -> Self {
+        tracing::debug!("loading queue from disk");
         let normal = disk
             .normal
             .into_iter()
@@ -89,6 +115,7 @@ impl RequestQueue {
     }
 
     pub fn to_disk(&self) -> DiskQueue {
+        tracing::info!("saving queue to disk");
         let normal = self
             .normal
             .iter()

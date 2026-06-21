@@ -5,6 +5,8 @@ use clap::Parser;
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     let args = Args::parse();
+    
+    tracing_subscriber::fmt::init();
 
     match args.command {
         Commands::Serve {
@@ -12,8 +14,9 @@ async fn main() {
             target,
             ban_threshold,
         } => {
+            tracing::info!("ankro server started.");
             if let Err(err) = serve(port, target, ban_threshold).await {
-                eprintln!("{err}");
+                tracing::error!("{err}");
                 std::process::exit(1);
             }
         }

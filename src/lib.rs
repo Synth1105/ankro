@@ -70,7 +70,7 @@ pub async fn serve(port: u32, target: String, ban_threshold: usize) -> Result<()
             let _permit = permit;
             if let Err(err) = handle_connection(stream, target.as_str(), ip, banned, queue).await
             {
-                eprintln!("connection error: {err}");
+                tracing::error!("connection error: {err}");
             }
         });
     }
@@ -93,6 +93,7 @@ async fn handle_connection(
     banned: bool,
     queue: SharedQueue,
 ) -> Result<(), AnyError> {
+    tracing::debug!("handling request");
     let (read_half, mut write_half) = stream.into_split();
     let reader = BufReader::new(read_half);
     let mut lines = reader.lines();
@@ -113,7 +114,10 @@ async fn handle_connection(
         match rx.await {
             Ok(Ok(response)) => write_half.write_all(&response).await?,
             Ok(Err(err)) => write_half.write_all(err.as_bytes()).await?,
-            Err(_) => write_half.write_all(b"queue consumer dropped\n").await?,
+            Err(_) => { 
+                tracing::error!("queue comsumer dropped");
+                write_half.write_all(b"queue consumer dropped\n").await?;
+            },
         }
 
         return Ok(());
@@ -127,10 +131,11 @@ async fn handle_connection(
 fn spawn_queue_consumer(target: Arc<String>, queue: SharedQueue) {
     tokio::spawn(async move {
         loop {
+            tracing::debug!("comsumer started");
             let request = match wait_for_request(&queue).await {
                 Ok(request) => request,
                 Err(err) => {
-                    eprintln!("queue wait failed: {err}");
+                    tracing::error!("queue wait failed: {err}");
                     time::sleep(Duration::from_millis(250)).await;
                     continue;
                 }
@@ -139,6 +144,8 @@ fn spawn_queue_consumer(target: Arc<String>, queue: SharedQueue) {
             while busy(target.as_str()).await.unwrap_or(true) {
                 time::sleep(Duration::from_millis(100)).await;
             }
+            
+            tracing::debug!("consuming queue");
 
             let response = match run_target(target.as_str(), &request.request).await {
                 Ok(response) => Ok(response),

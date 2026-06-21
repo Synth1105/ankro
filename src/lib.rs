@@ -3,10 +3,10 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::{
     error::Error,
-    path::Path,
-    path::PathBuf,
+    env,
+    path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{atomic::{AtomicU64, Ordering}, Arc},
     time::Duration,
 };
 
@@ -31,7 +31,9 @@ pub mod queue;
 type AnyError = Box<dyn Error + Send + Sync>;
 
 const QUEUE_PATH: &str = "/tmp/ankro/queue.json";
-const MAX_CONCURRENT_CONNECTIONS: usize = 256;
+// Keep the live socket/child process count well below common per-process FD limits.
+const MAX_CONCURRENT_CONNECTIONS: usize = 64;
+static QUEUE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct QueueState {
     queue: Mutex<RequestQueue>,
@@ -41,9 +43,9 @@ struct QueueState {
 type SharedQueue = Arc<QueueState>;
 
 pub async fn serve(port: u32, target: String, ban_threshold: usize) -> Result<(), AnyError> {
-    validate_target(&target)?;
+    let target = Arc::new(resolve_target(target)?);
+    warmup_target(target.as_str()).await?;
     let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
-    let target = Arc::new(target);
     let queue = Arc::new(QueueState {
         queue: Mutex::new(load_queue().await?),
         notify: Notify::new(),
@@ -75,7 +77,12 @@ pub async fn serve(port: u32, target: String, ban_threshold: usize) -> Result<()
 }
 
 pub async fn busy(target: &str) -> Result<bool, AnyError> {
-    let result = Command::new(target).arg("-b").output().await?.stdout;
+    let result = Command::new(target)
+        .arg("-b")
+        .output()
+        .await
+        .map_err(|err| format!("failed to probe target with -b: {target} ({err})"))?
+        .stdout;
     Ok(!result.is_empty())
 }
 
@@ -147,22 +154,17 @@ fn spawn_queue_consumer(target: Arc<String>, queue: SharedQueue) {
 
 async fn wait_for_request(queue: &SharedQueue) -> Result<PendingRequest, AnyError> {
     loop {
-        let maybe_request = {
-            let mut guard = queue.queue.lock().await;
-            let request = guard.pop();
-            if request.is_some() {
-                let disk_queue = guard.to_disk();
-                Some((request, disk_queue))
-            } else {
-                None
+        let mut guard = queue.queue.lock().await;
+        if let Some((request, banned)) = guard.pop() {
+            let disk_queue = guard.to_disk();
+            if let Err(err) = save_disk_queue(disk_queue).await {
+                guard.push_front(request, banned);
+                return Err(err);
             }
-        };
-
-        if let Some((Some(request), disk_queue)) = maybe_request {
-            save_disk_queue(disk_queue).await?;
             return Ok(request);
         }
 
+        drop(guard);
         queue.notify.notified().await;
     }
 }
@@ -190,20 +192,18 @@ async fn enqueue_request(
     ip: std::net::IpAddr,
     banned: bool,
 ) -> Result<(), AnyError> {
-    let disk_queue = {
-        let mut guard = queue.queue.lock().await;
-        guard.push(
-            PendingRequest {
-                ip: Some(ip),
-                request,
-                responder,
-            },
-            banned,
-        );
-        guard.to_disk()
-    };
-
+    let mut guard = queue.queue.lock().await;
+    guard.push(
+        PendingRequest {
+            ip: Some(ip),
+            request,
+            responder,
+        },
+        banned,
+    );
+    let disk_queue = guard.to_disk();
     save_disk_queue(disk_queue).await?;
+    drop(guard);
     queue.notify.notify_one();
     Ok(())
 }
@@ -214,33 +214,46 @@ async fn run_target(target: &str, request: &[String]) -> Result<Vec<u8>, AnyErro
         .arg(request.join(","))
         .stdout(Stdio::piped())
         .output()
-        .await?
+        .await
+        .map_err(|err| format!("failed to execute target with -r: {target} ({err})"))?
         .stdout;
     Ok(response)
 }
 
-fn validate_target(target: &str) -> Result<(), AnyError> {
+fn resolve_target(target: String) -> Result<String, AnyError> {
     let looks_like_path = target.contains('/') || target.starts_with('.') || target.starts_with('~');
-    if !looks_like_path {
-        return Ok(());
+    let mut candidates = Vec::new();
+
+    if looks_like_path {
+        candidates.push(PathBuf::from(&target));
+    } else {
+        candidates.push(PathBuf::from(&target));
+        if let Ok(cwd) = env::current_dir() {
+            candidates.push(cwd.join(&target));
+        }
+
+        if let Some(paths) = env::var_os("PATH") {
+            candidates.extend(env::split_paths(&paths).map(|dir| dir.join(&target)));
+        }
     }
 
-    let path = Path::new(target);
-    let metadata = std::fs::metadata(path).map_err(|err| {
-        let hint = if path.is_dir() {
-            "target points to a directory; pass the actual executable path instead"
-        } else {
-            "target path does not exist"
-        };
-
-        format!("{hint}: {target} ({err})")
-    })?;
-
-    if !metadata.is_file() {
-        return Err(format!("target is not a file: {target}").into());
+    for candidate in candidates {
+        match std::fs::metadata(&candidate) {
+            Ok(metadata) if metadata.is_file() => {
+                return Ok(std::fs::canonicalize(candidate)?.to_string_lossy().into_owned());
+            }
+            Ok(metadata) if metadata.is_dir() && looks_like_path => {
+                return Err(
+                    format!("target points to a directory; pass the actual executable path instead: {target}")
+                        .into(),
+                );
+            }
+            Ok(_) => continue,
+            Err(_) => continue,
+        }
     }
 
-    Ok(())
+    Err(format!("target executable not found: {target}").into())
 }
 
 async fn load_queue() -> Result<RequestQueue, AnyError> {
@@ -275,13 +288,107 @@ async fn load_queue() -> Result<RequestQueue, AnyError> {
 
 async fn save_disk_queue(queue: DiskQueue) -> Result<(), AnyError> {
     let path = PathBuf::from(QUEUE_PATH);
+    let path_display = path.display().to_string();
     if let Some(parent) = path.parent() {
         tokio_fs::create_dir_all(parent).await?;
     }
 
     let content = serde_json::to_string(&queue)?;
-    let tmp_path = path.with_extension("json.tmp");
-    tokio_fs::write(&tmp_path, content).await?;
-    tokio_fs::rename(tmp_path, path).await?;
+    let tmp_path = queue_tmp_path(&path);
+    tokio_fs::write(&tmp_path, content)
+        .await
+        .map_err(|err| format!("failed to write queue temp file {} ({err})", tmp_path.display()))?;
+    tokio_fs::rename(tmp_path, path)
+        .await
+        .map_err(|err| format!("failed to persist queue file {path_display} ({err})"))?;
     Ok(())
+}
+
+fn queue_tmp_path(path: &Path) -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let sequence = QUEUE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("queue.json");
+
+    path.with_file_name(format!("{file_name}.{stamp}.{sequence}.tmp"))
+}
+
+async fn warmup_target(target: &str) -> Result<(), AnyError> {
+    match busy(target).await {
+        Ok(_) => Ok(()),
+        Err(err) => Err(format!("target is not executable or not reachable: {target} ({err})").into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{queue_tmp_path, resolve_target};
+    use std::{
+        fs,
+        io::Write,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn temp_path(suffix: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("ankro-{suffix}-{stamp}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn resolve_target_returns_canonical_file_path() {
+        let path = temp_path("file");
+        let mut file = fs::File::create(&path).expect("create temp file");
+        writeln!(file, "demo").expect("write temp file");
+
+        let resolved = resolve_target(path.to_string_lossy().into_owned()).expect("resolve file");
+        let expected = fs::canonicalize(&path)
+            .expect("canonicalize temp file")
+            .to_string_lossy()
+            .into_owned();
+
+        assert_eq!(resolved, expected);
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn resolve_target_rejects_directories() {
+        let path = temp_path("dir");
+        fs::create_dir_all(&path).expect("create temp dir");
+
+        let error = resolve_target(path.to_string_lossy().into_owned()).expect_err("reject dir");
+        let message = error.to_string();
+
+        assert!(message.contains("directory"), "{message}");
+
+        let _ = fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn queue_tmp_path_is_unique() {
+        let path = Path::new("/tmp/ankro/queue.json");
+        let first = queue_tmp_path(path);
+        let second = queue_tmp_path(path);
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), path.parent());
+        assert_eq!(second.parent(), path.parent());
+        assert!(first
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("queue.json.")));
+        assert!(second
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("queue.json.")));
+    }
 }

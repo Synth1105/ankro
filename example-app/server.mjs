@@ -68,7 +68,6 @@ async function dispatchRequest({ source, payload }) {
                 source,
                 payload,
             }),
-            timeoutMs: 30000,
         });
 
         const durationMs = Date.now() - startedAt;

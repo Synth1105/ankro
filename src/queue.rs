@@ -45,8 +45,19 @@ impl RequestQueue {
         }
     }
 
-    pub fn pop(&mut self) -> Option<PendingRequest> {
-        self.normal.pop_front().or_else(|| self.banned.pop_front())
+    pub fn pop(&mut self) -> Option<(PendingRequest, bool)> {
+        self.normal
+            .pop_front()
+            .map(|request| (request, false))
+            .or_else(|| self.banned.pop_front().map(|request| (request, true)))
+    }
+
+    pub fn push_front(&mut self, request: PendingRequest, banned: bool) {
+        if banned {
+            self.banned.push_front(request);
+        } else {
+            self.normal.push_front(request);
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -124,11 +135,13 @@ mod tests {
             false,
         );
 
-        let first = queue.pop().unwrap();
-        let second = queue.pop().unwrap();
+        let (first, first_banned) = queue.pop().unwrap();
+        let (second, second_banned) = queue.pop().unwrap();
 
         assert_eq!(first.request, vec!["normal"]);
         assert_eq!(second.request, vec!["banned"]);
+        assert!(!first_banned);
+        assert!(second_banned);
         assert!(queue.is_empty());
     }
 }

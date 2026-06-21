@@ -5,7 +5,7 @@ use clap::Parser;
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     let args = Args::parse();
-    
+
     tracing_subscriber::fmt::init();
 
     match args.command {

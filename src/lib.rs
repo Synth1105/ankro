@@ -1,3 +1,9 @@
+//! Core runtime for `ankro`.
+//!
+//! The crate exposes the TCP bridge, request queue, target resolution, and
+//! queue persistence logic used by the example application and the CLI entry
+//! point.
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -28,6 +34,7 @@ pub mod args;
 pub mod ban;
 pub mod queue;
 
+/// A boxed error type used throughout the runtime.
 type AnyError = Box<dyn Error + Send + Sync>;
 
 const QUEUE_PATH: &str = "/tmp/ankro/queue.json";
@@ -42,6 +49,11 @@ struct QueueState {
 
 type SharedQueue = Arc<QueueState>;
 
+/// Start the bridge server and run it until the process exits.
+///
+/// The server listens on `0.0.0.0:<port>`, resolves `target` to an executable,
+/// warms it up with a busy probe, and then serves requests by either executing
+/// the target immediately or queueing the request for later consumption.
 pub async fn serve(port: u32, target: String, ban_threshold: usize) -> Result<(), AnyError> {
     let target = Arc::new(resolve_target(target)?);
     warmup_target(target.as_str()).await?;
@@ -76,6 +88,7 @@ pub async fn serve(port: u32, target: String, ban_threshold: usize) -> Result<()
     }
 }
 
+/// Probe the target with `-b` and return `true` when it reports busy.
 pub async fn busy(target: &str) -> Result<bool, AnyError> {
     let result = Command::new(target)
         .arg("-b")

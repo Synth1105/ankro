@@ -1,7 +1,11 @@
+//! IP-based request banning for the `ankro` bridge.
+
 use std::{
     collections::{HashMap, HashSet},
     net::IpAddr,
 };
+
+/// Tracks request counts per IP and marks callers as banned once they cross a threshold.
 pub struct BanList {
     threshold: usize,
     counts: HashMap<IpAddr, usize>,
@@ -9,6 +13,7 @@ pub struct BanList {
 }
 
 impl BanList {
+    /// Create a new ban list with the provided threshold.
     pub fn new(threshold: usize) -> Self {
         Self {
             threshold,
@@ -17,6 +22,7 @@ impl BanList {
         }
     }
 
+    /// Record one request from `ip` and return whether that IP is now banned.
     pub fn record(&mut self, ip: IpAddr) -> bool {
         tracing::debug!("recording ip {ip}");
         let count = self.counts.entry(ip).or_insert(0);
@@ -29,6 +35,7 @@ impl BanList {
         self.is_banned(&ip)
     }
 
+    /// Check whether `ip` is currently banned.
     pub fn is_banned(&self, ip: &IpAddr) -> bool {
         if  self.banned.contains(ip) {
             tracing::debug!("{ip} is banned");
@@ -36,6 +43,7 @@ impl BanList {
         self.banned.contains(ip)
     }
 
+    /// Return the current request counter map.
     pub fn counts(&self) -> &HashMap<IpAddr, usize> {
         &self.counts
     }

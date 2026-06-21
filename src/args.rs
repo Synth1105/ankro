@@ -1,26 +1,32 @@
+//! Command-line argument definitions for `ankro`.
+//!
+//! The binary currently exposes one subcommand, `serve`, which starts the TCP
+//! bridge and connects it to a target executable.
+
 use clap::{Parser, Subcommand};
 
-/// Gatekeeper For Your Web Application.
+/// Parsed top-level CLI arguments for `ankro`.
 #[derive(Parser)]
 pub struct Args {
+    /// The selected subcommand.
     #[command(subcommand)]
     pub command: Commands,
 }
 
-/// ankro's commands
+/// Supported `ankro` subcommands.
 #[derive(Subcommand)]
 pub enum Commands {
-    /// serve ankro at port.
+    /// Run the bridge server.
     Serve {
-        /// The port to serve on
+        /// TCP port used by the bridge server.
         #[arg(short, long, default_value_t = 1234)]
         port: u32,
 
-        /// The target address or host
+        /// Path or command name of the target executable.
         #[arg(short, long)]
         target: String,
 
-        /// Number of requests allowed per IP before banning
+        /// Number of requests allowed per IP before banning.
         #[arg(long, default_value_t = 1000)]
         ban_threshold: usize,
     },

@@ -3,14 +3,19 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::{
     error::Error,
-    fs,
-    io::{BufReader, Write, prelude::*},
-    net::{IpAddr, TcpListener, TcpStream},
     path::PathBuf,
-    process::Command,
-    sync::{Arc, Condvar, Mutex, mpsc},
-    thread,
+    process::Stdio,
+    sync::Arc,
     time::Duration,
+};
+
+use tokio::{
+    fs as tokio_fs,
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::{TcpListener, TcpStream},
+    process::Command,
+    sync::{oneshot, Mutex, Notify},
+    time,
 };
 
 use crate::{
@@ -20,61 +25,71 @@ use crate::{
 
 pub mod args;
 pub mod ban;
-pub mod pool;
 pub mod queue;
 
-type SharedQueue = Arc<(Mutex<RequestQueue>, Condvar)>;
+type AnyError = Box<dyn Error + Send + Sync>;
 
 const QUEUE_PATH: &str = "/tmp/ankro/queue.json";
-pub fn serve(port: u32, target: String, ban_threshold: usize) -> Result<(), Box<dyn Error>> {
-    let url = format!("0.0.0.0:{}", port);
-    let listener = TcpListener::bind(&url)?;
-    let pool = pool::ThreadPool::new(4);
+const MAX_CONCURRENT_CONNECTIONS: usize = 256;
+
+struct QueueState {
+    queue: Mutex<RequestQueue>,
+    notify: Notify,
+}
+
+type SharedQueue = Arc<QueueState>;
+
+pub async fn serve(port: u32, target: String, ban_threshold: usize) -> Result<(), AnyError> {
+    let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     let target = Arc::new(target);
-    let queue = Arc::new((Mutex::new(load_queue()?), Condvar::new()));
+    let queue = Arc::new(QueueState {
+        queue: Mutex::new(load_queue().await?),
+        notify: Notify::new(),
+    });
     let bans = Arc::new(Mutex::new(BanList::new(ban_threshold)));
+    let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
 
     spawn_queue_consumer(Arc::clone(&target), Arc::clone(&queue));
 
-    for stream in listener.incoming() {
-        let stream = stream?;
-        let ip = stream.peer_addr()?.ip();
+    loop {
+        let (stream, addr) = listener.accept().await?;
+        let ip = addr.ip();
+        let permit = Arc::clone(&permits).acquire_owned().await?;
         let banned = {
-            let mut ban_list = bans.lock().unwrap();
+            let mut ban_list = bans.lock().await;
             ban_list.record(ip)
         };
         let target = Arc::clone(&target);
         let queue = Arc::clone(&queue);
 
-        pool.execute(move || {
-            if let Err(err) =
-                handle_connection(stream, target.as_str(), ip, banned, Arc::clone(&queue))
+        tokio::spawn(async move {
+            let _permit = permit;
+            if let Err(err) = handle_connection(stream, target.as_str(), ip, banned, queue).await
             {
                 eprintln!("connection error: {err}");
             }
         });
     }
-
-    Ok(())
 }
 
-pub fn busy(target: &str) -> Result<bool, Box<dyn Error>> {
-    let result = Command::new(target).arg("-b").output()?.stdout;
+pub async fn busy(target: &str) -> Result<bool, AnyError> {
+    let result = Command::new(target).arg("-b").output().await?.stdout;
     Ok(!result.is_empty())
 }
 
-pub fn handle_connection(
-    mut stream: TcpStream,
+async fn handle_connection(
+    stream: TcpStream,
     target: &str,
-    ip: IpAddr,
+    ip: std::net::IpAddr,
     banned: bool,
     queue: SharedQueue,
-) -> Result<(), Box<dyn Error>> {
-    let mut reader = BufReader::new(stream.try_clone()?);
+) -> Result<(), AnyError> {
+    let (read_half, mut write_half) = stream.into_split();
+    let reader = BufReader::new(read_half);
+    let mut lines = reader.lines();
 
     let mut request = Vec::new();
-    for line in reader.by_ref().lines() {
-        let line = line?;
+    while let Some(line) = lines.next_line().await? {
         if line.is_empty() {
             break;
         }
@@ -82,120 +97,133 @@ pub fn handle_connection(
         request.push(line);
     }
 
-    if should_queue(target, &queue, banned)? {
-        let (tx, rx) = mpsc::channel();
-        enqueue_request(&queue, request, Some(tx), ip, banned)?;
+    if should_queue(target, &queue, banned).await? {
+        let (tx, rx) = oneshot::channel();
+        enqueue_request(&queue, request, Some(tx), ip, banned).await?;
 
-        match rx.recv()? {
-            Ok(response) => stream.write_all(&response)?,
-            Err(err) => stream.write_all(err.as_bytes())?,
+        match rx.await {
+            Ok(Ok(response)) => write_half.write_all(&response).await?,
+            Ok(Err(err)) => write_half.write_all(err.as_bytes()).await?,
+            Err(_) => write_half.write_all(b"queue consumer dropped\n").await?,
         }
 
         return Ok(());
     }
 
-    let response = run_target(target, &request)?;
-    stream.write_all(&response)?;
+    let response = run_target(target, &request).await?;
+    write_half.write_all(&response).await?;
     Ok(())
 }
 
 fn spawn_queue_consumer(target: Arc<String>, queue: SharedQueue) {
-    thread::spawn(move || {
+    tokio::spawn(async move {
         loop {
-            let request = match wait_for_request(&queue) {
+            let request = match wait_for_request(&queue).await {
                 Ok(request) => request,
                 Err(err) => {
                     eprintln!("queue wait failed: {err}");
-                    thread::sleep(Duration::from_millis(250));
+                    time::sleep(Duration::from_millis(250)).await;
                     continue;
                 }
             };
 
-            while let Ok(true) = busy(target.as_str()) {
-                thread::sleep(Duration::from_millis(100));
+            while busy(target.as_str()).await.unwrap_or(true) {
+                time::sleep(Duration::from_millis(100)).await;
             }
 
-            let response = match run_target(target.as_str(), &request.request) {
+            let response = match run_target(target.as_str(), &request.request).await {
                 Ok(response) => Ok(response),
                 Err(err) => Err(err.to_string()),
             };
 
             if let Some(responder) = request.responder {
-                if let Err(err) = responder.send(response) {
-                    eprintln!("queue response send failed: {err}");
-                }
+                let _ = responder.send(response);
             }
         }
     });
 }
 
-fn wait_for_request(queue: &SharedQueue) -> Result<PendingRequest, Box<dyn Error>> {
-    let (lock, cvar) = &**queue;
-    let mut guard = lock.lock().unwrap();
-
+async fn wait_for_request(queue: &SharedQueue) -> Result<PendingRequest, AnyError> {
     loop {
-        if let Some(request) = guard.pop() {
-            save_queue_locked(&guard)?;
+        let maybe_request = {
+            let mut guard = queue.queue.lock().await;
+            let request = guard.pop();
+            if request.is_some() {
+                let disk_queue = guard.to_disk();
+                Some((request, disk_queue))
+            } else {
+                None
+            }
+        };
+
+        if let Some((Some(request), disk_queue)) = maybe_request {
+            save_disk_queue(disk_queue).await?;
             return Ok(request);
         }
 
-        guard = cvar.wait(guard).unwrap();
+        queue.notify.notified().await;
     }
 }
 
-fn should_queue(target: &str, queue: &SharedQueue, banned: bool) -> Result<bool, Box<dyn Error>> {
+async fn should_queue(target: &str, queue: &SharedQueue, banned: bool) -> Result<bool, AnyError> {
     if banned {
         return Ok(true);
     }
 
-    let (lock, _) = &**queue;
-    let guard = lock.lock().unwrap();
-    if !guard.is_empty() {
+    let queue_has_items = {
+        let guard = queue.queue.lock().await;
+        !guard.is_empty()
+    };
+    if queue_has_items {
         return Ok(true);
     }
 
-    drop(guard);
-    busy(target)
+    busy(target).await
 }
 
-fn enqueue_request(
+async fn enqueue_request(
     queue: &SharedQueue,
     request: Vec<String>,
-    responder: Option<mpsc::Sender<Response>>,
-    ip: IpAddr,
+    responder: Option<oneshot::Sender<Response>>,
+    ip: std::net::IpAddr,
     banned: bool,
-) -> Result<(), Box<dyn Error>> {
-    let (lock, cvar) = &**queue;
-    let mut guard = lock.lock().unwrap();
-    guard.push(
-        PendingRequest {
-            ip: Some(ip),
-            request,
-            responder,
-        },
-        banned,
-    );
-    save_queue_locked(&guard)?;
-    cvar.notify_one();
+) -> Result<(), AnyError> {
+    let disk_queue = {
+        let mut guard = queue.queue.lock().await;
+        guard.push(
+            PendingRequest {
+                ip: Some(ip),
+                request,
+                responder,
+            },
+            banned,
+        );
+        guard.to_disk()
+    };
+
+    save_disk_queue(disk_queue).await?;
+    queue.notify.notify_one();
     Ok(())
 }
 
-fn run_target(target: &str, request: &[String]) -> Result<Vec<u8>, Box<dyn Error>> {
+async fn run_target(target: &str, request: &[String]) -> Result<Vec<u8>, AnyError> {
     let response = Command::new(target)
         .arg("-r")
         .arg(request.join(","))
-        .output()?
+        .stdout(Stdio::piped())
+        .output()
+        .await?
         .stdout;
     Ok(response)
 }
 
-fn load_queue() -> Result<RequestQueue, Box<dyn Error>> {
+async fn load_queue() -> Result<RequestQueue, AnyError> {
     let path = PathBuf::from(QUEUE_PATH);
-    if !path.try_exists()? {
+    if !tokio_fs::try_exists(&path).await? {
         return Ok(RequestQueue::new());
     }
 
-    let file = fs::read_to_string(path)?;
+    let file = tokio_fs::read_to_string(&path).await?;
     match serde_json::from_str::<DiskQueue>(&file) {
         Ok(disk_queue) => Ok(RequestQueue::from_disk(disk_queue)),
         Err(_) => {
@@ -219,16 +247,15 @@ fn load_queue() -> Result<RequestQueue, Box<dyn Error>> {
     }
 }
 
-fn save_queue_locked(queue: &RequestQueue) -> Result<(), Box<dyn Error>> {
+async fn save_disk_queue(queue: DiskQueue) -> Result<(), AnyError> {
     let path = PathBuf::from(QUEUE_PATH);
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        tokio_fs::create_dir_all(parent).await?;
     }
 
-    let disk_queue = queue.to_disk();
-    let content = serde_json::to_string(&disk_queue)?;
+    let content = serde_json::to_string(&queue)?;
     let tmp_path = path.with_extension("json.tmp");
-    fs::write(&tmp_path, content)?;
-    fs::rename(tmp_path, path)?;
+    tokio_fs::write(&tmp_path, content).await?;
+    tokio_fs::rename(tmp_path, path).await?;
     Ok(())
 }

@@ -1,6 +1,7 @@
-use std::{collections::VecDeque, net::IpAddr, sync::mpsc::Sender};
+use std::{collections::VecDeque, net::IpAddr};
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot::Sender;
 
 pub type Response = Result<Vec<u8>, String>;
 

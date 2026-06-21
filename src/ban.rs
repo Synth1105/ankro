@@ -2,7 +2,6 @@ use std::{
     collections::{HashMap, HashSet},
     net::IpAddr,
 };
-
 pub struct BanList {
     threshold: usize,
     counts: HashMap<IpAddr, usize>,

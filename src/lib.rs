@@ -3,6 +3,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::{
     error::Error,
+    path::Path,
     path::PathBuf,
     process::Stdio,
     sync::Arc,
@@ -40,6 +41,7 @@ struct QueueState {
 type SharedQueue = Arc<QueueState>;
 
 pub async fn serve(port: u32, target: String, ban_threshold: usize) -> Result<(), AnyError> {
+    validate_target(&target)?;
     let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     let target = Arc::new(target);
     let queue = Arc::new(QueueState {
@@ -215,6 +217,30 @@ async fn run_target(target: &str, request: &[String]) -> Result<Vec<u8>, AnyErro
         .await?
         .stdout;
     Ok(response)
+}
+
+fn validate_target(target: &str) -> Result<(), AnyError> {
+    let looks_like_path = target.contains('/') || target.starts_with('.') || target.starts_with('~');
+    if !looks_like_path {
+        return Ok(());
+    }
+
+    let path = Path::new(target);
+    let metadata = std::fs::metadata(path).map_err(|err| {
+        let hint = if path.is_dir() {
+            "target points to a directory; pass the actual executable path instead"
+        } else {
+            "target path does not exist"
+        };
+
+        format!("{hint}: {target} ({err})")
+    })?;
+
+    if !metadata.is_file() {
+        return Err(format!("target is not a file: {target}").into());
+    }
+
+    Ok(())
 }
 
 async fn load_queue() -> Result<RequestQueue, AnyError> {

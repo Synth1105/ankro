@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.0.6](https://github.com/Synth1105/ankro/compare/v0.0.5...v0.0.6) - 2026-06-21
+
+### Added
+
+- add log(tracing)
+
 ## [0.0.5](https://github.com/Synth1105/ankro/compare/v0.0.4...v0.0.5) - 2026-06-21
 
 ### Fixed
